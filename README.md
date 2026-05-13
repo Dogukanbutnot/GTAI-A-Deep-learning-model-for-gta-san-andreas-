@@ -1,197 +1,259 @@
-"""
-train.py
-CNN modelini eğitir.
+# 🎮 GTA San Andreas AI Sürüş Ajanı
 
-Kullanım (lokal veya Colab):
-    python train.py --sessions surus_01 surus_02 --arch gtanet --epochs 30
+> CNN tabanlı Taklit Öğrenme (Imitation Learning) ile GTA San Andreas Sürüş Okulu görevlerini tamamlayan otonom ajan.
 
-Colab için:
-    !python train.py --sessions surus_01 --arch gtanet --epochs 50 --batch 64
-"""
+---
 
-import argparse
-import json
-import time
-from pathlib import Path
+## 📌 Proje Hakkında
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+Bu proje, bir insan oyuncunun oynarken ürettiği ekran görüntüsü ve klavye verilerini kullanarak sürüş kararları almayı öğrenen bir yapay zeka ajanı geliştirmeyi amaçlamaktadır. Model mimarisi **GTAI** (GTA AI) olarak adlandırılmıştır.
 
-# Proje modülleri
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from models.cnn_model import build_model, save_model, count_parameters
-from models.dataset   import build_loaders
+Ham piksel verisinden doğrudan aksiyon tahmini yapan bu yaklaşım, uçtan uca (end-to-end) öğrenme paradigmasının somut bir uygulamasıdır.
 
+---
 
-# ─────────────────────────────────────────────────────────────
-# Eğitim döngüsü
-# ─────────────────────────────────────────────────────────────
-def train_one_epoch(model, loader, criterion, optimizer, device):
-    model.train()
-    total_loss, correct, total = 0.0, 0, 0
+## 🧠 Nasıl Çalışır?
 
-    for frames, labels in loader:
-        frames = frames.to(device)
-        labels = labels.to(device)
+```
+Ekran Görüntüsü (1280x720)
+        │
+        ▼
+  Ön İşleme (224x224, normalize)
+        │
+        ▼
+   GTAI CNN Modeli
+   [Conv→BN→ReLU→Pool] x4
+   → Global Avg Pool
+   → FC 512 → FC 10
+        │
+        ▼
+  Aksiyon Tahmini (10 sınıf)
+  [W / A / S / D / W+A / W+D ...]
+        │
+        ▼
+  Klavye Çıktısı (pydirectinput)
+```
 
-        optimizer.zero_grad()
-        logits = model(frames)
-        loss   = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+**Eğitim yöntemi:** Behavioral Cloning — sen oynarsın, GTAI kaydeder, sonra taklit eder.
 
-        total_loss += loss.item() * frames.size(0)
-        preds       = logits.argmax(dim=1)
-        correct    += (preds == labels).sum().item()
-        total      += frames.size(0)
+---
 
-    return total_loss / total, correct / total
+## 📁 Proje Yapısı
 
+```
+gta-sa-ai/
+│
+├── capture/
+│   ├── screen_capture.py     # MSS ile gerçek zamanlı ekran yakalama
+│   ├── input_logger.py       # Klavye dinleme ve aksiyon etiketleme
+│   └── collect_data.py       # Veri toplama ana scripti
+│
+├── models/
+│   ├── cnn_model.py          # GTAI CNN mimarisi
+│   └── dataset.py            # PyTorch Dataset ve DataLoader
+│
+├── train/
+│   └── train.py              # Model eğitim döngüsü
+│
+├── play/
+│   └── run_agent.py          # Eğitilmiş modeli oyunda çalıştırır
+│
+├── data/
+│   └── sessions/             # Kayıt oturumları (otomatik oluşur)
+│       └── <oturum_adı>/
+│           ├── frames/       # .npy formatında frame'ler
+│           ├── labels.npy    # Aksiyon etiketleri
+│           └── meta.json     # Oturum bilgileri
+│
+├── checkpoints/              # Eğitilmiş model ağırlıkları (.pth)
+├── requirements.txt
+└── README.md
+```
 
-@torch.no_grad()
-def validate(model, loader, criterion, device):
-    model.eval()
-    total_loss, correct, total = 0.0, 0, 0
+---
 
-    for frames, labels in loader:
-        frames = frames.to(device)
-        labels = labels.to(device)
+## ⚙️ Kurulum
 
-        logits = model(frames)
-        loss   = criterion(logits, labels)
+### Gereksinimler
+- Python 3.10+
+- Windows 10/11 (pydirectinput Windows gerektirir)
+- GTA San Andreas (PC)
 
-        total_loss += loss.item() * frames.size(0)
-        preds       = logits.argmax(dim=1)
-        correct    += (preds == labels).sum().item()
-        total      += frames.size(0)
+### Adımlar
 
-    return total_loss / total, correct / total
+```bash
+# 1. Repoyu klonla
+git clone https://github.com/kullanici-adi/gta-sa-ai.git
+cd gta-sa-ai
 
+# 2. Sanal ortam oluştur (önerilir)
+python -m venv venv
+venv\Scripts\activate
 
-# ─────────────────────────────────────────────────────────────
-# Ana eğitim fonksiyonu
-# ─────────────────────────────────────────────────────────────
-def train(
-    sessions:    list[str],
-    arch:        str   = "gtanet",
-    epochs:      int   = 30,
-    batch_size:  int   = 32,
-    lr:          float = 1e-3,
-    val_split:   float = 0.2,
-    save_dir:    str   = "checkpoints",
-    num_workers: int   = 2,
-):
-    # ── Cihaz ──
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else
-        "mps"  if torch.backends.mps.is_available() else
-        "cpu"
-    )
-    print(f"[Train] Cihaz: {device}")
+# 3. Bağımlılıkları yükle
+pip install -r requirements.txt
+```
 
-    # ── Train / Val bölme ──
-    split_idx   = max(1, int(len(sessions) * (1 - val_split)))
-    train_sess  = sessions[:split_idx]
-    val_sess    = sessions[split_idx:] if split_idx < len(sessions) else sessions[:1]
-    print(f"[Train] Train oturumları: {train_sess}")
-    print(f"[Train] Val oturumları  : {val_sess}")
+> ⚠️ PyTorch kurulumu için GPU'na uygun komutu [pytorch.org](https://pytorch.org/get-started/locally/) adresinden al. `torch` ve `torchvision` her zaman birlikte güncellenmeli.
 
-    # ── DataLoader'lar ──
-    train_loader, val_loader = build_loaders(
-        train_sess, val_sess,
-        batch_size=batch_size, num_workers=num_workers
-    )
+---
 
-    # ── Model ──
-    model = build_model(arch).to(device)
-    print(f"[Train] Model: {arch.upper()}  |  Parametre: {count_parameters(model):,}")
+## 🚀 Kullanım
 
-    # ── Loss, Optimizer, Scheduler ──
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=5, factor=0.5, verbose=True)
+### 1. Veri Toplama
 
-    # ── Checkpoint klasörü ──
-    save_path = Path(save_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
+GTA San Andreas'ı aç, Sürüş Okulu görevine gir. Ardından:
 
-    # ── Eğitim ──
-    history    = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-    best_val   = float("inf")
-    best_epoch = 0
+```bash
+cd capture
+python collect_data.py --session surus_okulu_01 --fps 30
+```
 
-    print(f"\n{'─'*60}")
-    print(f"{'Epoch':>6} {'TrLoss':>8} {'TrAcc':>7} {'VaLoss':>8} {'VaAcc':>7} {'LR':>9}")
-    print(f"{'─'*60}")
+- 3 saniyelik geri sayım sonrası kayıt başlar
+- Oyuna geç ve görevi **başarıyla** tamamla
+- Durdurmak için önizleme penceresinde `Q` veya `Ctrl+C`
+- Her başarılı görev serisi için yeni bir oturum adı kullan
 
-    for epoch in range(1, epochs + 1):
-        t0 = time.time()
+**Önerilen kayıt süresi:** 2 saat (≈ 216.000 frame)
 
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        va_loss, va_acc = validate(model, val_loader, criterion, device)
+```bash
+# Birden fazla oturum örneği
+python collect_data.py --session surus_okulu_02 --fps 30
+python collect_data.py --session surus_okulu_03 --fps 30
+```
 
-        scheduler.step(va_loss)
-        current_lr = optimizer.param_groups[0]["lr"]
+---
 
-        history["train_loss"].append(tr_loss)
-        history["train_acc"].append(tr_acc)
-        history["val_loss"].append(va_loss)
-        history["val_acc"].append(va_acc)
+### 2. Model Eğitimi
 
-        elapsed = time.time() - t0
-        print(f"{epoch:>6} {tr_loss:>8.4f} {tr_acc:>6.2%} {va_loss:>8.4f} {va_acc:>6.2%} {current_lr:>9.2e}  ({elapsed:.1f}s)")
+#### Lokal (GPU varsa)
+```bash
+cd train
+python train.py --sessions surus_okulu_01 surus_okulu_02 --arch gtai --epochs 30
+```
 
-        # En iyi modeli kaydet
-        if va_loss < best_val:
-            best_val   = va_loss
-            best_epoch = epoch
-            save_model(model, save_path / f"best_{arch}.pth")
-            print(f"          ★ Yeni en iyi model kaydedildi (epoch {epoch})")
+#### Google Colab (önerilen)
+```python
+# Colab'de çalıştır
+from google.colab import drive
+drive.mount('/content/drive')
 
-    # Son modeli kaydet
-    save_model(model, save_path / f"last_{arch}.pth")
+# Veriyi Drive'dan kopyala
+!cp -r /content/drive/MyDrive/gta-sa-ai /content/
 
-    # History JSON
-    with open(save_path / "history.json", "w") as f:
-        json.dump(history, f, indent=2)
+# Eğitimi başlat
+!python train/train.py \
+    --sessions surus_okulu_01 surus_okulu_02 \
+    --arch gtai \
+    --epochs 50 \
+    --batch 64
+```
 
-    print(f"\n{'─'*60}")
-    print(f"  Eğitim tamamlandı!")
-    print(f"  En iyi val loss: {best_val:.4f}  (epoch {best_epoch})")
-    print(f"  Model kayıt yeri: {save_path}/")
-    print(f"{'─'*60}\n")
+Eğitim tamamlandığında `checkpoints/best_gtai.pth` dosyası oluşur.
 
-    return history
+---
 
+### 3. Ajanı Çalıştır
 
-# ─────────────────────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GTA SA CNN Eğitimi")
-    parser.add_argument("--sessions",    nargs="+", required=True,
-                        help="Oturum adları: surus_01 surus_02 ...")
-    parser.add_argument("--arch",        default="gtanet",
-                        choices=["gtanet", "resnet"])
-    parser.add_argument("--epochs",      type=int,   default=30)
-    parser.add_argument("--batch",       type=int,   default=32)
-    parser.add_argument("--lr",          type=float, default=1e-3)
-    parser.add_argument("--val_split",   type=float, default=0.2)
-    parser.add_argument("--save_dir",    default="checkpoints")
-    parser.add_argument("--workers",     type=int,   default=2)
+```bash
+cd play
+python run_agent.py --model ../checkpoints/best_gtai.pth --arch gtai
+```
 
-    args = parser.parse_args()
+- Oyunu aç ve sürüş görevini başlat
+- Script 5 saniye bekler, ardından kontrol GTAI'ya geçer
+- Önizleme penceresinde aksiyon olasılıkları görünür
+- Durdurmak için `Q` veya `Ctrl+C`
 
-    train(
-        sessions    = args.sessions,
-        arch        = args.arch,
-        epochs      = args.epochs,
-        batch_size  = args.batch,
-        lr          = args.lr,
-        val_split   = args.val_split,
-        save_dir    = args.save_dir,
-        num_workers = args.workers,
-    )
+---
+
+## 🎯 Aksiyon Uzayı
+
+| Etiket | Eylem | Tuş(lar) |
+|--------|-------|----------|
+| 0 | Boşta | — |
+| 1 | İleri | W |
+| 2 | Sol | A |
+| 3 | Sağ | D |
+| 4 | Fren / Geri | S |
+| 5 | İleri + Sol | W + A |
+| 6 | İleri + Sağ | W + D |
+| 7 | Fren + Sol | S + A |
+| 8 | Fren + Sağ | S + D |
+| 9 | El Freni | Space |
+
+---
+
+## 🏗️ GTAI Model Mimarisi
+
+```
+Girdi: (B, 3, 224, 224)
+
+Conv2d(3→32)   + BatchNorm + ReLU + MaxPool   →  (B, 32,  112, 112)
+Conv2d(32→64)  + BatchNorm + ReLU + MaxPool   →  (B, 64,   56,  56)
+Conv2d(64→128) + BatchNorm + ReLU + MaxPool   →  (B, 128,  28,  28)
+Conv2d(128→256)+ BatchNorm + ReLU + MaxPool   →  (B, 256,  14,  14)
+
+Global Average Pooling                         →  (B, 256)
+Linear(256→512) + ReLU + Dropout(0.4)         →  (B, 512)
+Linear(512→10)                                 →  (B, 10)
+
+Çıktı: 10 sınıf logit
+```
+
+---
+
+## 📊 Eğitim Detayları
+
+| Parametre | Değer |
+|-----------|-------|
+| Optimizer | Adam |
+| Learning Rate | 1e-3 |
+| LR Scheduler | ReduceLROnPlateau |
+| Batch Size | 32 |
+| Dropout | 0.4 |
+| Loss Fonksiyonu | CrossEntropyLoss |
+| Sınıf Dengesi | WeightedRandomSampler |
+
+---
+
+## 🔄 Geliştirme Yol Haritası
+
+- [x] Ekran yakalama altyapısı
+- [x] Klavye kayıt ve etiketleme sistemi
+- [x] GTAI CNN mimarisi
+- [x] Eğitim pipeline (Imitation Learning)
+- [x] Gerçek zamanlı inference
+- [ ] Daha fazla oturum verisi toplama
+- [ ] Model performans değerlendirmesi
+- [ ] Reinforcement Learning entegrasyonu *(gelecek sürüm)*
+
+---
+
+## 📦 Bağımlılıklar
+
+```
+torch >= 2.1.0
+torchvision >= 0.16.0
+mss
+pynput
+pydirectinput
+opencv-python
+numpy >= 1.24.0
+Pillow
+```
+
+---
+
+## ⚠️ Önemli Notlar
+
+- Veri toplarken yalnızca **başarıyla tamamlanan** görevleri kaydet
+- Ani veya yanlış hareketler içeren bölümleri kaydetme
+- `torch` ve `torchvision` sürümlerini her zaman birlikte güncelle
+- `pydirectinput` yalnızca **Windows** üzerinde çalışır
+
+---
+
+## 📄 Lisans
+
+Bu proje akademik amaçlı geliştirilmiştir.
