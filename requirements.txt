@@ -1,0 +1,48 @@
+# GTA San Andreas AI Agent
+# Okul Projesi — CNN ile Imitation Learning
+
+## Gereksinimler
+```
+pip install -r requirements.txt
+```
+
+## Adım Adım Kullanım
+
+### 1. Veri Toplama (Lokal)
+```bash
+cd capture
+python collect_data.py --session surus_01 --fps 30
+```
+Oyuna geç, sürüş okulunu başarıyla tamamla.
+Her başarılı görev sonrası yeni oturum aç.
+
+### 2. Eğitim (Colab veya Lokal)
+```bash
+cd train
+python train.py --sessions surus_01 surus_02 --arch gtanet --epochs 30
+```
+
+### 3. Ajanı Çalıştır (Lokal)
+```bash
+cd play
+python run_agent.py --model ../checkpoints/best_gtanet.pth --arch gtanet
+```
+
+## Proje Yapısı
+```
+gta-sa-ai/
+├── capture/
+│   ├── screen_capture.py   # Ekran yakalama
+│   ├── input_logger.py     # Klavye kaydı
+│   └── collect_data.py     # Veri toplama ana script
+├── models/
+│   ├── cnn_model.py        # GTANet + ResNetAgent
+│   └── dataset.py          # PyTorch Dataset
+├── train/
+│   └── train.py            # Eğitim döngüsü
+├── play/
+│   └── run_agent.py        # AI oynuyor
+├── data/sessions/          # Kaydedilen veriler
+├── checkpoints/            # Eğitilmiş modeller
+└── requirements.txt
+```
